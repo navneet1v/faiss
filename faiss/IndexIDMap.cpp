@@ -16,7 +16,6 @@
 
 #include <faiss/impl/AuxIndexStructures.h>
 #include <faiss/impl/FaissAssert.h>
-#include <faiss/impl/IDSelector.h>
 #include <faiss/utils/Heap.h>
 #include <faiss/utils/WorkerThread.h>
 
@@ -79,9 +78,13 @@ void IndexIDMapTemplate<IndexT>::search(
         typename IndexT::distance_t* distances,
         idx_t* labels,
         const SearchParameters* params) const {
-    FAISS_THROW_IF_NOT_MSG(
-            !params, "search params not supported for this index");
-    index->search(n, x, k, distances, labels);
+    if (params && params->sel) {
+        auto idtrans = dynamic_cast<const IDSelectorTranslated*>(params->sel);
+        FAISS_THROW_IF_NOT_MSG(
+                idtrans,
+                "IndexIDMap requires an IDSelectorTranslated on input");
+    }
+    index->search(n, x, k, distances, labels, params);
     idx_t* li = labels;
 #pragma omp parallel for
     for (idx_t i = 0; i < n * k; i++) {
@@ -106,26 +109,10 @@ void IndexIDMapTemplate<IndexT>::range_search(
     }
 }
 
-namespace {
-
-struct IDTranslatedSelector : IDSelector {
-    const std::vector<int64_t>& id_map;
-    const IDSelector& sel;
-    IDTranslatedSelector(
-            const std::vector<int64_t>& id_map,
-            const IDSelector& sel)
-            : id_map(id_map), sel(sel) {}
-    bool is_member(idx_t id) const override {
-        return sel.is_member(id_map[id]);
-    }
-};
-
-} // namespace
-
 template <typename IndexT>
 size_t IndexIDMapTemplate<IndexT>::remove_ids(const IDSelector& sel) {
     // remove in sub-index first
-    IDTranslatedSelector sel2(id_map, sel);
+    IDSelectorTranslated sel2(id_map, sel);
     size_t nremove = index->remove_ids(sel2);
 
     int64_t j = 0;
