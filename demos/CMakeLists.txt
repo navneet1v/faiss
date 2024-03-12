@@ -4,8 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+
+
 add_executable(demo_imi_flat EXCLUDE_FROM_ALL demo_imi_flat.cpp)
 target_link_libraries(demo_imi_flat PRIVATE faiss)
+
+add_executable(demo_imi_hnsw EXCLUDE_FROM_ALL demo_imi_hnsw.cpp)
+target_link_libraries(demo_imi_hnsw PRIVATE faiss)
+
+find_package(OpenMP REQUIRED)
+
+target_link_libraries(demo_imi_hnsw PRIVATE OpenMP::OpenMP_CXX gtest_main)
 
 add_executable(demo_imi_pq EXCLUDE_FROM_ALL demo_imi_pq.cpp)
 target_link_libraries(demo_imi_pq PRIVATE faiss)

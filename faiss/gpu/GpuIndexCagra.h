@@ -247,6 +247,8 @@ struct GpuIndexCagra : public GpuIndex {
     /// Trains CAGRA based on the given vector data
     void train(idx_t n, const float* x) override;
 
+    void add(idx_t n, const float* x);
+
     /// Initialize ourselves from the given CPU index; will overwrite
     /// all data in ourselves
     void copyFrom(const faiss::IndexHNSWCagra* index);
