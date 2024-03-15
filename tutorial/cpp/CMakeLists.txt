@@ -39,8 +39,15 @@ find_package(OpenMP REQUIRED)
 
 add_executable(cagra-cpu-test EXCLUDE_FROM_ALL cagra-cpu-test.cpp)
 target_link_libraries(cagra-cpu-test PRIVATE faiss)
-target_link_libraries(cagra-cpu-test PRIVATE OpenMP::OpenMP_CXX gtest_main)
+target_link_libraries(cagra-cpu-test PRIVATE OpenMP::OpenMP_CXX)
 
+
+add_executable(cagra-cpu-check-id-map-working EXCLUDE_FROM_ALL cagra-cpu-check-id-map-working.cpp)
+target_link_libraries(cagra-cpu-check-id-map-working PRIVATE faiss)
+target_link_libraries(cagra-cpu-check-id-map-working PRIVATE OpenMP::OpenMP_CXX)
+
+
+option(FAISS_ENABLE_RAFT "Enable RAFT for GPU indexes." OFF)
 
 if(FAISS_ENABLE_RAFT)
     find_package(CUDAToolkit REQUIRED)
@@ -49,11 +56,24 @@ if(FAISS_ENABLE_RAFT)
     add_executable(cagra-test EXCLUDE_FROM_ALL cagra-test.cpp)
     ## Add the raft dependencies
     target_link_libraries(cagra-test PRIVATE faiss CUDA::cudart raft::raft raft::compiled)
+
+    add_executable(check-id-map-working EXCLUDE_FROM_ALL check-id-map-working.cpp)
+    target_link_libraries(check-id-map-working PRIVATE faiss CUDA::cudart raft::raft raft::compiled)
+
 endif()
 
-# Link OMP as it is required for HNSW
-find_package(OpenMP REQUIRED)
 
+# You can create a commons link where you link all your libraries
+add_library(commons commons.cpp)
+# Make sure others can see these links
+target_link_libraries(commons PUBLIC OpenMP::OpenMP_CXX faiss)
+# HNSW Testing
+add_executable(hnsw-test EXCLUDE_FROM_ALL hnsw-test.cpp)
+target_link_libraries(hnsw-test commons)
+
+
+
+# Some random tests
 target_link_libraries(navneet-test PRIVATE OpenMP::OpenMP_CXX gtest_main)
 
 # This is for OMP
