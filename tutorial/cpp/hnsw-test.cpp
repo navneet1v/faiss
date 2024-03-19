@@ -30,6 +30,11 @@ int main() {
     faiss::IndexIDMap idMap = faiss::IndexIDMap(indexWriter.get());
     idMap.add_with_ids(numVectors, dataset.data(), idVector.data());
 
+    std::vector<float> queryVector = {90, 91, 92, 93};
+    std::vector<float> dis(3);
+    std::vector<faiss::idx_t> ids(3);
+    idMap.search(1, queryVector.data(), 3, dis.data(), ids.data());
+
     // Write the index to disk
     std::string indexPathCpp = "hnsw-index.txt";
     faiss::write_index(&idMap, indexPathCpp.c_str());
