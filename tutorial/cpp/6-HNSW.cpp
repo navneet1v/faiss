@@ -61,6 +61,8 @@ int main() {
                 printf("%5f ", D[i * k + j]);
             printf("\n");
         }
+        printf("Number of distances computed %lu\n", faiss::hnsw_stats.ndis);
+        printf("Number of edges Traversed %lu\n", faiss::hnsw_stats.nhops);
 
         delete[] I;
         delete[] D;
