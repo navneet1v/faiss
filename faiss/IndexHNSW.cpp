@@ -906,6 +906,18 @@ IndexHNSWCagra::IndexHNSWCagra(int d, int M, MetricType metric)
     keep_max_size_level0 = true;
 }
 
+IndexHNSWCagra::IndexHNSWCagra(Index* storage, int M): IndexHNSW(storage, M) {
+    FAISS_THROW_IF_NOT_MSG(
+            ((storage->metric_type == METRIC_L2) ||
+             (storage->metric_type == METRIC_INNER_PRODUCT)),
+            "unsupported metric type for IndexHNSWCagra");
+    own_fields = true;
+    is_trained = true;
+    init_level0 = true;
+    keep_max_size_level0 = true;
+}
+
+
 void IndexHNSWCagra::add(idx_t n, const float* x) {
     FAISS_THROW_IF_NOT_MSG(
             !base_level_only,
@@ -963,6 +975,33 @@ void IndexHNSWCagra::search(
                 1, // search_type
                 params);
     }
+}
+
+/**************************************************************
+ * IndexHNSWCagraSQ implementation
+ **************************************************************/
+IndexHNSWCagraSQ::IndexHNSWCagraSQ() {
+    FAISS_THROW_MSG(
+            "unsupported initialization for IndexHNSWCagraSQ");
+}
+
+IndexHNSWCagraSQ::IndexHNSWCagraSQ(int d, int M, MetricType metric)
+        : IndexHNSWCagra(d, M, metric) {
+    FAISS_THROW_MSG(
+            "unsupported initialization for IndexHNSWCagraSQ");
+}
+
+IndexHNSWCagraSQ::IndexHNSWCagraSQ(int d, ScalarQuantizer::QuantizerType qtype,
+            int M,
+            MetricType metric)
+        : IndexHNSWCagra(new IndexScalarQuantizer(d, qtype, metric), M) {
+    FAISS_THROW_IF_NOT_MSG(
+            ((metric == METRIC_L2) || (metric == METRIC_INNER_PRODUCT)),
+            "unsupported metric type for IndexHNSWCagra");
+    own_fields = true;
+    is_trained = true;
+    init_level0 = true;
+    keep_max_size_level0 = true;
 }
 
 } // namespace faiss

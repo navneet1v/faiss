@@ -171,6 +171,8 @@ struct IndexHNSW2Level : IndexHNSW {
 struct IndexHNSWCagra : IndexHNSW {
     IndexHNSWCagra();
     IndexHNSWCagra(int d, int M, MetricType metric = METRIC_L2);
+    explicit IndexHNSWCagra(Index* storage, int M = 32);
+
 
     /// When set to true, the index is immutable.
     /// This option is used to copy the knn graph from GpuIndexCagra
@@ -196,5 +198,17 @@ struct IndexHNSWCagra : IndexHNSW {
             idx_t* labels,
             const SearchParameters* params = nullptr) const override;
 };
+
+struct IndexHNSWCagraSQ : IndexHNSWCagra {
+    IndexHNSWCagraSQ();
+    IndexHNSWCagraSQ(
+            int d,
+            ScalarQuantizer::QuantizerType qtype,
+            int M,
+            MetricType metric);
+
+  IndexHNSWCagraSQ(int d, int M, MetricType metric);
+};
+
 
 } // namespace faiss
