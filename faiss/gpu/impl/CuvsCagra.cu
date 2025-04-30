@@ -25,11 +25,14 @@
 #include <faiss/gpu/utils/CuvsUtils.h>
 #include <faiss/gpu/utils/DeviceUtils.h>
 #include <faiss/gpu/impl/CuvsCagra.cuh>
+#include <faiss/impl/ScalarQuantizer.h>
 
 #include <cuvs/neighbors/cagra.hpp>
 #include <raft/core/device_mdspan.hpp>
 #include <raft/core/device_resources.hpp>
 #include <raft/core/resource/thrust_policy.hpp>
+#include <faiss/gpu/utils/CopyUtils.cuh>
+#include <iostream>
 
 namespace faiss {
 namespace gpu {
@@ -80,6 +83,7 @@ CuvsCagra::CuvsCagra(
     reset();
 }
 
+// TODO: This function doesn't work. Need to fix it.
 CuvsCagra::CuvsCagra(
         GpuResources* resources,
         int dim,
@@ -94,73 +98,84 @@ CuvsCagra::CuvsCagra(
           dim_(dim),
           metric_(metric),
           metricArg_(metricArg) {
-    FAISS_THROW_IF_NOT_MSG(
-            metric == faiss::METRIC_L2 || metric == faiss::METRIC_INNER_PRODUCT,
-            "CAGRA currently only supports L2 or Inner Product metric.");
-    FAISS_THROW_IF_NOT_MSG(
-            indicesOptions == faiss::gpu::INDICES_64_BIT,
-            "only INDICES_64_BIT is supported for cuVS CAGRA index");
+//     FAISS_THROW_IF_NOT_MSG(
+//             metric == faiss::METRIC_L2 || metric == faiss::METRIC_INNER_PRODUCT,
+//             "CAGRA currently only supports L2 or Inner Product metric.");
+//     FAISS_THROW_IF_NOT_MSG(
+//             indicesOptions == faiss::gpu::INDICES_64_BIT,
+//             "only INDICES_64_BIT is supported for cuVS CAGRA index");
 
-    auto distances_on_gpu = getDeviceForAddress(distances) >= 0;
-    auto knn_graph_on_gpu = getDeviceForAddress(knn_graph) >= 0;
+//     auto distances_on_gpu = getDeviceForAddress(distances) >= 0;
+//     auto knn_graph_on_gpu = getDeviceForAddress(knn_graph) >= 0;
 
-    FAISS_ASSERT(distances_on_gpu == knn_graph_on_gpu);
+//     FAISS_ASSERT(distances_on_gpu == knn_graph_on_gpu);
 
-    storage_ = distances;
-    n_ = n;
+//     storage_ = distances;
+//     n_ = n;
 
-    const raft::device_resources& raft_handle =
-            resources_->getRaftHandleCurrentDevice();
+//     const raft::device_resources& raft_handle =
+//             resources_->getRaftHandleCurrentDevice();
 
-    if (distances_on_gpu && knn_graph_on_gpu) {
-        raft_handle.sync_stream();
-        // Copying to host so that cuvs::neighbors::cagra::index
-        // creates an owning copy of the knn graph on device
-        auto knn_graph_copy =
-                raft::make_host_matrix<uint32_t, int64_t>(n, graph_degree);
-        thrust::copy(
-                thrust::device_ptr<const idx_t>(knn_graph),
-                thrust::device_ptr<const idx_t>(knn_graph + (n * graph_degree)),
-                knn_graph_copy.data_handle());
+//     if (distances_on_gpu && knn_graph_on_gpu) {
+//         raft_handle.sync_stream();
+//         // Copying to host so that cuvs::neighbors::cagra::index
+//         // creates an owning copy of the knn graph on device
+//         auto knn_graph_copy =
+//                 raft::make_host_matrix<uint32_t, int64_t>(n, graph_degree);
+//         thrust::copy(
+//                 thrust::device_ptr<const idx_t>(knn_graph),
+//                 thrust::device_ptr<const idx_t>(knn_graph + (n * graph_degree)),
+//                 knn_graph_copy.data_handle());
 
-        auto distances_mds =
-                raft::make_device_matrix_view<const float, int64_t>(
-                        distances, n, dim);
+//         auto distances_mds =
+//                 raft::make_device_matrix_view<const float, int64_t>(
+//                         distances, n, dim);
 
-        cuvs_index = std::make_shared<
-                cuvs::neighbors::cagra::index<float, uint32_t>>(
-                raft_handle,
-                metricFaissToCuvs(metric_, false),
-                distances_mds,
-                raft::make_const_mdspan(knn_graph_copy.view()));
-    } else if (!distances_on_gpu && !knn_graph_on_gpu) {
-        // copy idx_t (int64_t) host knn_graph to uint32_t host knn_graph
-        auto knn_graph_copy =
-                raft::make_host_matrix<uint32_t, int64_t>(n, graph_degree);
-        std::copy(
-                knn_graph,
-                knn_graph + (n * graph_degree),
-                knn_graph_copy.data_handle());
+//         // cuvs_index = std::make_shared<
+//         //         cuvs::neighbors::cagra::index<half, uint32_t>>(
+//         //         raft_handle,
+//         //         metricFaissToCuvs(metric_, false),
+//         //         distances_mds,
+//         //         raft::make_const_mdspan(knn_graph_copy.view()));
+//     } else if (!distances_on_gpu && !knn_graph_on_gpu) {
+//         // copy idx_t (int64_t) host knn_graph to uint32_t host knn_graph
+//         auto knn_graph_copy =
+//                 raft::make_host_matrix<uint32_t, int64_t>(n, graph_degree);
+//         std::copy(
+//                 knn_graph,
+//                 knn_graph + (n * graph_degree),
+//                 knn_graph_copy.data_handle());
 
-        auto distances_mds = raft::make_host_matrix_view<const float, int64_t>(
-                distances, n, dim);
+//         auto distances_mds = raft::make_host_matrix_view<const float, int64_t>(
+//                 distances, n, dim);
 
-        cuvs_index = std::make_shared<
-                cuvs::neighbors::cagra::index<float, uint32_t>>(
-                raft_handle,
-                metricFaissToCuvs(metric_, false),
-                distances_mds,
-                raft::make_const_mdspan(knn_graph_copy.view()));
-    } else {
-        FAISS_THROW_MSG(
-                "distances and knn_graph must both be in device or host memory");
-    }
+//         // cuvs_index = std::make_shared<
+//         //         cuvs::neighbors::cagra::index<half, uint32_t>>(
+//         //         raft_handle,
+//         //         metricFaissToCuvs(metric_, false),
+//         //         distances_mds,
+//         //         raft::make_const_mdspan(knn_graph_copy.view()));
+//     } else {
+//         FAISS_THROW_MSG(
+//                 "distances and knn_graph must both be in device or host memory");
+//     }
 }
 
-void CuvsCagra::train(idx_t n, const float* x) {
-    storage_ = x;
-    n_ = n;
 
+void CuvsCagra::train(idx_t n, const float* x) {
+    std::cout<<"Doing Quantization first"<<std::endl;
+    // This logic should be moved to a separate function which users can call to just quantize the vectors
+    // lets quantize the vectors here.
+    ScalarQuantizer fp16ScalerQuantizer(dim_, ScalarQuantizer::QT_fp16);
+    // 2 for 2 bytes per dimensions
+    uint8_t* quantizedVectors = static_cast<uint8_t*>(malloc(dim_ * n * 2 * sizeof(uint8_t)));
+    fp16ScalerQuantizer.compute_codes(x, quantizedVectors, n);
+    std::cout<<"Vectors are quantized"<<std::endl;
+    const half* half_vector = (half*)quantizedVectors;
+
+    storage_ = half_vector;
+    n_ = n;
+    
     const raft::device_resources& raft_handle =
             resources_->getRaftHandleCurrentDevice();
 
@@ -191,23 +206,23 @@ void CuvsCagra::train(idx_t n, const float* x) {
 
     if (getDeviceForAddress(x) >= 0) {
         auto dataset =
-                raft::make_device_matrix_view<const float, int64_t>(x, n, dim_);
+                raft::make_device_matrix_view<const half, int64_t>(half_vector, n, dim_);
         cuvs_index = std::make_shared<
-                cuvs::neighbors::cagra::index<float, uint32_t>>(
+                cuvs::neighbors::cagra::index<half, uint32_t>>(
                 cuvs::neighbors::cagra::build(
                         raft_handle, index_params_, dataset));
     } else {
         auto dataset =
-                raft::make_host_matrix_view<const float, int64_t>(x, n, dim_);
+                raft::make_host_matrix_view<const half, int64_t>(half_vector, n, dim_);
         cuvs_index = std::make_shared<
-                cuvs::neighbors::cagra::index<float, uint32_t>>(
+                cuvs::neighbors::cagra::index<half, uint32_t>>(
                 cuvs::neighbors::cagra::build(
                         raft_handle, index_params_, dataset));
     }
 }
 
 void CuvsCagra::search(
-        Tensor<float, 2, true>& queries,
+        Tensor<half, 2, true>& queries,
         int k,
         Tensor<float, 2, true>& outDistances,
         Tensor<idx_t, 2, true>& outIndices,
@@ -234,20 +249,34 @@ void CuvsCagra::search(
     FAISS_ASSERT(numQueries > 0);
     FAISS_ASSERT(cols == dim_);
 
+//     std::cout<<"Quantizing Queries"<<std::endl;
+//     ScalarQuantizer fp16ScalerQuantizer(dim_, ScalarQuantizer::QT_fp16);
+//     // 2 for 2 bytes per dimensions
+//     uint8_t* quantizedVectors = static_cast<uint8_t*>(malloc(cols * numQueries * 2 * sizeof(uint8_t)));
+//     std::cout<<"Vectors are quantized"<<std::endl;
+//     for(int i = 0 ; i < numQueries; i++) {
+//         std::cout<<queries.data()<<" ";
+//     }
+
+//     fp16ScalerQuantizer.compute_codes(queries.data(), quantizedVectors, numQueries);
+//     std::cout<<"Vectors are quantized"<<std::endl;
+//     const half* half_vector = (half*)quantizedVectors;
+
+
     if (!store_dataset_) {
         if (getDeviceForAddress(storage_) >= 0) {
-            auto dataset = raft::make_device_matrix_view<const float, int64_t>(
+            auto dataset = raft::make_device_matrix_view<const half, int64_t>(
                     storage_, n_, dim_);
             cuvs_index->update_dataset(raft_handle, dataset);
         } else {
-            auto dataset = raft::make_host_matrix_view<const float, int64_t>(
+            auto dataset = raft::make_host_matrix_view<const half, int64_t>(
                     storage_, n_, dim_);
             cuvs_index->update_dataset(raft_handle, dataset);
         }
         store_dataset_ = true;
     }
 
-    auto queries_view = raft::make_device_matrix_view<const float, int64_t>(
+    auto queries_view = raft::make_device_matrix_view<const half, int64_t>(
             queries.data(), numQueries, cols);
     auto distances_view = raft::make_device_matrix_view<float, int64_t>(
             outDistances.data(), numQueries, k_);
@@ -319,7 +348,7 @@ std::vector<idx_t> CuvsCagra::get_knngraph() const {
     return host_graph;
 }
 
-const float* CuvsCagra::get_training_dataset() const {
+const half* CuvsCagra::get_training_dataset() const {
     return storage_;
 }
 

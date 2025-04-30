@@ -264,7 +264,7 @@ struct GpuIndexCagra : public GpuIndex {
 
     /// Copy ourselves to the given CPU index; will overwrite all data
     /// in the index instance
-    void copyTo(faiss::IndexHNSWCagra* index) const;
+    void copyTo(faiss::IndexHNSWCagraSQ* index) const;
 
     void reset() override;
 

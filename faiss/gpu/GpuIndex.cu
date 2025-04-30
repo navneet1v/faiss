@@ -290,18 +290,18 @@ void GpuIndex::searchNonPaged_(
         float* outDistancesData,
         idx_t* outIndicesData,
         const SearchParameters* params) const {
-    auto stream = resources_->getDefaultStream(config_.device);
+    // auto stream = resources_->getDefaultStream(config_.device);
 
-    // Make sure arguments are on the device we desire; use temporary
-    // memory allocations to move it if necessary
-    auto vecs = toDeviceTemporary<float, 2>(
-            resources_.get(),
-            config_.device,
-            const_cast<float*>(x),
-            stream,
-            {n, this->d});
+    // // Make sure arguments are on the device we desire; use temporary
+    // // memory allocations to move it if necessary
+    // auto vecs = toDeviceTemporary<float, 2>(
+    //         resources_.get(),
+    //         config_.device,
+    //         const_cast<float*>(x),
+    //         stream,
+    //         {n, this->d});
 
-    searchImpl_(n, vecs.data(), k, outDistancesData, outIndicesData, params);
+    searchImpl_(n, x, k, outDistancesData, outIndicesData, params);
 }
 
 void GpuIndex::searchFromCpuPaged_(

@@ -30,6 +30,7 @@
 #include <faiss/impl/ResultHandler.h>
 #include <faiss/utils/random.h>
 #include <faiss/utils/sorting.h>
+#include <iostream>
 
 namespace faiss {
 
@@ -935,9 +936,12 @@ void IndexHNSWCagra::search(
         float* distances,
         idx_t* labels,
         const SearchParameters* params) const {
+    std::cout<<"I am doing search"<<std::endl;
     if (!base_level_only) {
+        std::cout<<"Doing base level search"<<std::endl;
         IndexHNSW::search(n, x, k, distances, labels, params);
     } else {
+        std::cout<<"Doing other search"<<std::endl;
         std::vector<storage_idx_t> nearest(n);
         std::vector<float> nearest_d(n);
 

@@ -17,6 +17,7 @@
 #include <faiss/impl/FaissAssert.h>
 #include <faiss/utils/Heap.h>
 #include <faiss/utils/WorkerThread.h>
+#include <iostream>
 
 namespace faiss {
 
@@ -146,6 +147,10 @@ void IndexIDMapTemplate<IndexT>::search(
             this_idtrans.sel = params->sel;
             sel_change.set(params_non_const, &this_idtrans);
         }
+    }
+    std::cout<<"I am in indexIdMap Search";
+    for(int i = 0 ; i < 4; i++) {
+        std::cout<<x[i]<<std::endl;
     }
     index->search(n, x, k, distances, labels, params);
     idx_t* li = labels;

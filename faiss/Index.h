@@ -128,6 +128,15 @@ struct Index {
      */
     virtual void add_with_ids(idx_t n, const float* x, const idx_t* xids);
 
+    /**
+     * Same as add or add_with_ids, use the IndexStorage to insert data
+     * 
+     * @param n         number of vectors
+     * @param index     index from which we need to fill this index
+     */
+     //virtual void add_with_index(idx_t n, Index *index);
+
+
     /** query n vectors of dimension d to the index.
      *
      * return at most k vectors. If there are not enough results for a

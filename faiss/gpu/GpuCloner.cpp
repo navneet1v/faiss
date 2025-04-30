@@ -94,7 +94,7 @@ Index* ToCPUCloner::clone_Index(const Index* index) {
     }
 #if defined USE_NVIDIA_CUVS
     else if (auto icg = dynamic_cast<const GpuIndexCagra*>(index)) {
-        IndexHNSWCagra* res = new IndexHNSWCagra();
+        IndexHNSWCagraSQ* res = new IndexHNSWCagraSQ();
         icg->copyTo(res);
         return res;
     }

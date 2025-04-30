@@ -26,6 +26,8 @@
 #include <faiss/gpu/StandardGpuResources.h>
 #include <cstddef>
 #include <faiss/gpu/impl/CuvsCagra.cuh>
+#include <cuvs/neighbors/cagra.hpp>
+#include <faiss/gpu/utils/CopyUtils.cuh>
 #include <optional>
 
 namespace faiss {
@@ -125,7 +127,24 @@ void GpuIndexCagra::searchImpl_(
     FAISS_ASSERT(this->is_trained && index_);
     FAISS_ASSERT(n > 0);
 
-    Tensor<float, 2, true> queries(const_cast<float*>(x), {n, this->d});
+    std::cout<<"Quantizing Queries"<<std::endl;
+    ScalarQuantizer fp16ScalerQuantizer(this->d, ScalarQuantizer::QT_fp16);
+    // 2 for 2 bytes per dimensions
+    uint8_t* quantizedVectors = static_cast<uint8_t*>(malloc(this->d * n * 2 * sizeof(uint8_t)));
+    fp16ScalerQuantizer.compute_codes(x, quantizedVectors, n);
+    std::cout<<"Vectors are quantized"<<std::endl;
+    const half* host_vectors = (half*)quantizedVectors;
+
+
+    auto stream = resources_->getDefaultStream(config_.device);
+
+    // Make sure arguments are on the device we desire; use temporary
+    // memory allocations to move it if necessary
+    auto vecs = toDeviceTemporary<half, 2>(resources_.get(), config_.device, const_cast<half*>(host_vectors), stream, {n, this->d});
+
+    const half* half_vector = vecs.data();
+
+    Tensor<half, 2, true> queries(const_cast<half*>(half_vector), {n, this->d});
     Tensor<float, 2, true> outDistances(distances, {n, k});
     Tensor<idx_t, 2, true> outLabels(const_cast<idx_t*>(labels), {n, k});
 
@@ -202,7 +221,8 @@ void GpuIndexCagra::copyFrom(const faiss::IndexHNSWCagra* index) {
     this->is_trained = true;
 }
 
-void GpuIndexCagra::copyTo(faiss::IndexHNSWCagra* index) const {
+void GpuIndexCagra::copyTo(faiss::IndexHNSWCagraSQ* index) const {
+    std::cout<<"I am in copy to function"<<std::endl;
     FAISS_ASSERT(index_ && this->is_trained && index);
 
     DeviceScope scope(config_.device);
@@ -221,11 +241,15 @@ void GpuIndexCagra::copyTo(faiss::IndexHNSWCagra* index) const {
         delete index->storage;
     }
 
-    if (this->metric_type == METRIC_L2) {
-        index->storage = new IndexFlatL2(index->d);
-    } else if (this->metric_type == METRIC_INNER_PRODUCT) {
-        index->storage = new IndexFlatIP(index->d);
-    }
+    index->storage = new faiss::IndexScalarQuantizer(index->d, faiss::ScalarQuantizer::QT_fp16, this->metric_type);
+
+    // if (this->metric_type == METRIC_L2) {
+    //     // use ScalerQuantizedFlatIndex Here
+    //     index->storage = new IndexFlatL2(index->d);
+    // } else if (this->metric_type == METRIC_INNER_PRODUCT) {
+    //     // use ScalerQuantizedFlatIndex Here
+    //     index->storage = new IndexFlatIP(index->d);
+    // }
     index->own_fields = true;
     index->keep_max_size_level0 = true;
     index->hnsw.reset();
@@ -234,11 +258,15 @@ void GpuIndexCagra::copyTo(faiss::IndexHNSWCagra* index) const {
     index->hnsw.set_default_probas(M, 1.0 / log(M));
 
     auto n_train = this->ntotal;
-    float* train_dataset;
+    // needs to be fixed
+    //float* train_dataset;
+
+    half* train_dataset;
+    
     auto dataset = index_->get_training_dataset();
     bool allocation = false;
     if (getDeviceForAddress(dataset) >= 0) {
-        train_dataset = new float[n_train * index->d];
+        train_dataset = new half[n_train * index->d];
         allocation = true;
         raft::copy(
                 train_dataset,
@@ -246,18 +274,24 @@ void GpuIndexCagra::copyTo(faiss::IndexHNSWCagra* index) const {
                 n_train * index->d,
                 this->resources_->getRaftHandleCurrentDevice().get_stream());
     } else {
-        train_dataset = const_cast<float*>(dataset);
+        train_dataset = const_cast<half*>(dataset);
     }
 
     // turn off as level 0 is copied from CAGRA graph
     index->init_level0 = false;
-    if (!index->base_level_only) {
-        index->add(n_train, train_dataset);
-    } else {
-        index->hnsw.prepare_level_tab(n_train, false);
-        index->storage->add(n_train, train_dataset);
-        index->ntotal = n_train;
-    }
+    // if (!index->base_level_only) {
+    //     index->add(n_train, train_dataset);
+    // } else {
+    //     index->hnsw.prepare_level_tab(n_train, false);
+    //     index->storage->add(n_train, train_dataset);
+    //     index->ntotal = n_train;
+    // }
+    index->hnsw.prepare_level_tab(n_train, false);
+    // last argument is not used while adding the codes. So we should be good
+    index->storage->add_sa_codes(n_train, (uint8_t*)train_dataset, nullptr);
+    index->ntotal = n_train;
+    
+
     if (allocation) {
         delete[] train_dataset;
     }

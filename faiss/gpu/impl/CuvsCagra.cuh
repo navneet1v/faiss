@@ -80,7 +80,7 @@ class CuvsCagra {
     void train(idx_t n, const float* x);
 
     void search(
-            Tensor<float, 2, true>& queries,
+            Tensor<half, 2, true>& queries,
             int k,
             Tensor<float, 2, true>& outDistances,
             Tensor<idx_t, 2, true>& outIndices,
@@ -104,14 +104,14 @@ class CuvsCagra {
 
     std::vector<idx_t> get_knngraph() const;
 
-    const float* get_training_dataset() const;
+    const half* get_training_dataset() const;
 
    private:
     /// Collection of GPU resources that we use
     GpuResources* resources_;
 
     /// Training dataset
-    const float* storage_;
+    const half* storage_;
     int n_;
 
     /// Expected dimensionality of the vectors
@@ -143,7 +143,7 @@ class CuvsCagra {
     size_t nn_descent_niter_ = 20;
 
     /// Instance of trained cuVS CAGRA index
-    std::shared_ptr<cuvs::neighbors::cagra::index<float, uint32_t>> cuvs_index{
+    std::shared_ptr<cuvs::neighbors::cagra::index<half, uint32_t>> cuvs_index{
             nullptr};
 };
 
