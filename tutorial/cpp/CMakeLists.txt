@@ -29,3 +29,9 @@ target_link_libraries(8-PQFastScanRefine PRIVATE faiss)
 
 add_executable(9-RefineComparison EXCLUDE_FROM_ALL 9-RefineComparison.cpp)
 target_link_libraries(9-RefineComparison PRIVATE faiss)
+
+add_executable(SQ-Testing EXCLUDE_FROM_ALL SQ-Testing.cpp)
+find_package(OpenMP REQUIRED)
+find_package(CUDAToolkit REQUIRED)
+find_package(cuvs)
+target_link_libraries(SQ-Testing PRIVATE faiss OpenMP::OpenMP_CXX cuvs::cuvs)
