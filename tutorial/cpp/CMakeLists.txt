@@ -46,3 +46,10 @@ target_compile_options(cuvs_cagra_fp16_test PRIVATE
   >
 )
 target_link_libraries(cuvs_cagra_fp16_test PRIVATE faiss OpenMP::OpenMP_CXX cuvs::cuvs raft::raft)
+
+add_executable(fp_16_test EXCLUDE_FROM_ALL fp_16_test.cpp)
+find_package(OpenMP REQUIRED)
+find_package(CUDAToolkit REQUIRED)
+find_package(cuvs)
+find_package(raft)
+target_link_libraries(fp_16_test PRIVATE faiss OpenMP::OpenMP_CXX cuvs::cuvs raft::raft)
