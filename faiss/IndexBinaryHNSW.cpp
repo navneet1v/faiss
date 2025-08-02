@@ -200,6 +200,40 @@ void IndexBinaryHNSW::train(idx_t n, const uint8_t* x) {
     is_trained = true;
 }
 
+namespace {
+template <class BlockResultHandler>
+void hnsw_search(
+        const IndexBinaryHNSW* index,
+        idx_t n,
+        const uint8_t* x,
+        BlockResultHandler& bres,
+        const SearchParameters* params_in) {
+    const SearchParametersHNSW* params = nullptr;
+    const HNSW& hnsw = index->hnsw;
+
+    if (params_in) {
+        params = dynamic_cast<const SearchParametersHNSW*>(params_in);
+        FAISS_THROW_IF_NOT_MSG(params, "params type invalid");
+    }
+#pragma omp parallel
+    {
+        VisitedTable vt(index->ntotal);
+        std::unique_ptr<DistanceComputer> dis(index->get_distance_computer());
+        typename BlockResultHandler::SingleResultHandler res(bres);
+
+#pragma omp for
+        for (idx_t i = 0; i < n; i++) {
+            res.begin(i);
+            dis->set_query((float*)(x + i * index->code_size));
+            hnsw.search(*dis, res, vt, params);
+            res.end();
+        }
+    }
+}
+
+} // anonymous namespace
+
+
 void IndexBinaryHNSW::train(idx_t n, const void* x, NumericType numeric_type) {
     IndexBinary::train(n, x, numeric_type);
 }
@@ -210,31 +244,21 @@ void IndexBinaryHNSW::search(
         idx_t k,
         int32_t* distances,
         idx_t* labels,
-        const SearchParameters* params) const {
-    FAISS_THROW_IF_NOT_MSG(
-            !params, "search params not supported for this index");
+        const SearchParameters* params_in) const {
     FAISS_THROW_IF_NOT(k > 0);
 
     // we use the buffer for distances as float but convert them back
     // to int in the end
     float* distances_f = (float*)distances;
 
-    using RH = HeapBlockResultHandler<HNSW::C>;
-    RH bres(n, distances_f, labels, k);
-
-#pragma omp parallel
-    {
-        VisitedTable vt(ntotal);
-        std::unique_ptr<DistanceComputer> dis(get_distance_computer());
-        RH::SingleResultHandler res(bres);
-
-#pragma omp for
-        for (idx_t i = 0; i < n; i++) {
-            res.begin(i);
-            dis->set_query((float*)(x + i * code_size));
-            hnsw.search(*dis, res, vt);
-            res.end();
-        }
+    if (params_in && params_in->grp) {
+        using RH = GroupedHeapBlockResultHandler<HNSW::C>;
+        RH bres(n, distances_f, labels, k, params_in->grp);
+        hnsw_search(this, n, x, bres, params_in);
+    } else {
+        using RH = HeapBlockResultHandler<HNSW::C>;
+        RH bres(n, distances_f, labels, k);
+        hnsw_search(this, n, x, bres, params_in);
     }
 
 #pragma omp parallel for
