@@ -62,6 +62,29 @@ IndexIVFPQ::IndexIVFPQ(
     polysemous_training = nullptr;
     do_polysemous_training = false;
     polysemous_ht = 0;
+    precomputed_table = new AlignedTable<float>();
+    owns_precomputed_table = true;
+}
+
+IndexIVFPQ::IndexIVFPQ(const IndexIVFPQ& orig) : IndexIVF(orig), pq(orig.pq) {
+    code_size = orig.pq.code_size;
+    invlists->code_size = code_size;
+    is_trained = orig.is_trained;
+    by_residual = orig.by_residual;
+    use_precomputed_table = orig.use_precomputed_table;
+    scan_table_threshold = orig.scan_table_threshold;
+
+    polysemous_training = orig.polysemous_training;
+    do_polysemous_training = orig.do_polysemous_training;
+    polysemous_ht = orig.polysemous_ht;
+    precomputed_table = new AlignedTable<float>(*orig.precomputed_table);
+    owns_precomputed_table = true;
+}
+
+IndexIVFPQ::~IndexIVFPQ() {
+    if (owns_precomputed_table) {
+        delete precomputed_table;
+    }
 }
 
 /****************************************************************
@@ -475,10 +498,23 @@ void IndexIVFPQ::precompute_table() {
             use_precomputed_table,
             quantizer,
             pq,
-            precomputed_table,
+            *precomputed_table,
             by_residual,
             verbose);
 }
+
+void IndexIVFPQ::set_precomputed_table(
+        AlignedTable<float>* _precompute_table,
+        int _use_precomputed_table) {
+    // Clean up old pre-computed table
+    if (owns_precomputed_table) {
+        delete precomputed_table;
+    }
+    owns_precomputed_table = false;
+    precomputed_table = _precompute_table;
+    use_precomputed_table = _use_precomputed_table;
+}
+
 
 namespace {
 
@@ -659,7 +695,7 @@ struct QueryTables {
 
             fvec_madd(
                     pq.M * pq.ksub,
-                    ivfpq.precomputed_table.data() + key * pq.ksub * pq.M,
+                    ivfpq.precomputed_table->data() + key * pq.ksub * pq.M,
                     -2.0,
                     sim_table_2,
                     sim_table);
@@ -688,7 +724,7 @@ struct QueryTables {
                 k >>= cpq.nbits;
 
                 // get corresponding table
-                const float* pc = ivfpq.precomputed_table.data() +
+                const float* pc = ivfpq.precomputed_table->data() +
                         (ki * pq.M + cm * Mf) * pq.ksub;
 
                 if (polysemous_ht == 0) {
@@ -718,7 +754,7 @@ struct QueryTables {
             dis0 = coarse_dis;
 
             const float* s =
-                    ivfpq.precomputed_table.data() + key * pq.ksub * pq.M;
+                    ivfpq.precomputed_table->data() + key * pq.ksub * pq.M;
             for (int m = 0; m < pq.M; m++) {
                 sim_table_ptrs[m] = s;
                 s += pq.ksub;
@@ -738,7 +774,7 @@ struct QueryTables {
                 int ki = k & ((uint64_t(1) << cpq.nbits) - 1);
                 k >>= cpq.nbits;
 
-                const float* pc = ivfpq.precomputed_table.data() +
+                const float* pc = ivfpq.precomputed_table->data() +
                         (ki * pq.M + cm * Mf) * pq.ksub;
 
                 for (int m = m0; m < m0 + Mf; m++) {
@@ -1357,6 +1393,8 @@ IndexIVFPQ::IndexIVFPQ() {
     do_polysemous_training = false;
     polysemous_ht = 0;
     polysemous_training = nullptr;
+    precomputed_table = new AlignedTable<float>();
+    owns_precomputed_table = true;
 }
 
 struct CodeCmp {
