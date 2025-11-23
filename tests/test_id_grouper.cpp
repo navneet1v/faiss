@@ -482,3 +482,83 @@ TEST(IdGrouper, bitmap_with_binary_hnsw_idmap) {
     delete[] D;
 }
 
+TEST(IdGrouper, bitmap_with_binary_hnsw_cagra_idmap) {
+    // Dimension
+    int d = 16;
+    // Number of binary vector
+    int nb = 30;
+
+    // Applying 32x quantization
+    // e.g. 16 bits == 2 bytes
+    int codeSize = 2;
+    std::vector<uint8_t> database(nb * codeSize);
+    for (size_t i = 0; i < database.size(); ++i) {
+        database[i] = rand() & 0xFFU;
+    }
+
+    // Prepare bitmap ID grouper
+    std::vector<idx_t> xids (nb);
+    // group_size=2, num_binary=30, then (2 + 1) * 30 bits required.
+    // therefore, we give 2 uint64_t, which is 128 bits
+    uint64_t bitmap[2] = {};
+    faiss::IDGrouperBitmap id_grouper(2, bitmap);
+    int num_grp = 0;
+    // One parent will have 2 child docs.
+    int grp_size = 2;
+    int id_in_grp = 0;
+    for (int i = 0; i < nb; i++) {
+        xids[i] = i + num_grp;
+        id_in_grp++;
+        if (id_in_grp == grp_size) {
+            id_grouper.set_group(i + num_grp + 1);
+            num_grp++;
+            id_in_grp = 0;
+        }
+    }
+
+    // Create IndexBinaryHNSWCagra and append data
+    int k = 50;
+    int m = 8;
+
+    auto* index = new faiss::IndexBinaryHNSWCagra(d, m);
+    faiss::IndexBinaryIDMap id_map {index};
+
+    // Add vectors to the index
+    id_map.add_with_ids(nb, database.data(), xids.data());
+    // Force Cagra to search at the bottom level
+    index->base_level_only=true;
+
+    // ID and distance vectors
+    std::vector<idx_t> I (k);
+    std::vector<float> D (k);
+
+    // Set grouper
+    auto pSearchParameters = std::make_unique<faiss::SearchParametersHNSW>();
+    pSearchParameters->grp = &id_grouper;
+
+    // Start search with the first vector.
+    id_map.search(1, database.data(), k, (int32_t*) D.data(), I.data(), pSearchParameters.get());
+
+    std::unordered_set<int> group_ids;
+
+    // First vector should be come up first as Hamming(vec, vec) == 0
+    ASSERT_EQ(0, I[0]);
+    ASSERT_EQ(0, D[0]);
+    group_ids.insert(id_grouper.get_group(I[0]));
+
+    // We've already collected the first group id above.
+    int numResults = 1;
+    for (int j = 1; j < k; j++) {
+        if (I[j] != -1) {
+            // Valid result, collect group id.
+            group_ids.insert(id_grouper.get_group(I[j]));
+            ++numResults;
+        } else {
+            break;
+        }
+    }
+
+    // Make sure we collected unique group ids.
+    // E.g. we should not never collect the vectors having the same group id more than once.
+    ASSERT_EQ(numResults, group_ids.size());
+}

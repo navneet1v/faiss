@@ -377,6 +377,48 @@ void IndexBinaryHNSWCagra::add(idx_t n, const uint8_t* x) {
     IndexBinaryHNSW::add(n, x);
 }
 
+template <typename ResultHandler>
+void hnsw_search_level_0(
+        const IndexBinaryHNSWCagra* cagra_index,
+        idx_t n,
+        const uint8_t* x,
+        idx_t k,
+        const HNSW::storage_idx_t* nearest,
+        const float* nearest_d,
+        float* distances,
+        idx_t* labels,
+        const SearchParameters* params,
+        ResultHandler& bres) {
+    FAISS_THROW_IF_NOT(k > 0);
+
+#pragma omp parallel
+    {
+        VisitedTable vt(cagra_index->ntotal);
+        std::unique_ptr<DistanceComputer> dis(cagra_index->get_distance_computer());
+        HNSWStats search_stats;
+        typename ResultHandler::SingleResultHandler res(bres);
+
+#pragma omp for
+        for (idx_t i = 0; i < n; i++) {
+            res.begin(i);
+            dis->set_query((float*)(x + i * cagra_index->code_size));
+
+            cagra_index->hnsw.search_level_0(
+                    *dis,
+                    res,
+                    1,  // nprobe
+                    &nearest[i],
+                    &nearest_d[i],
+                    1, // search_type
+                    search_stats,
+                    vt,
+                    params);
+
+            res.end();
+        }
+    }
+}
+
 void IndexBinaryHNSWCagra::search(
         idx_t n,
         const uint8_t* x,
@@ -388,10 +430,6 @@ void IndexBinaryHNSWCagra::search(
         IndexBinaryHNSW::search(n, x, k, distances, labels, params);
     } else {
         float* distances_f = (float*)distances;
-
-        using RH = HeapBlockResultHandler<HNSW::C>;
-        RH bres(n, distances_f, labels, k);
-
         std::vector<storage_idx_t> nearest(n);
         std::vector<float> nearest_d(n);
 
@@ -420,38 +458,43 @@ void IndexBinaryHNSWCagra::search(
                     nearest[i] >= 0, "Could not find a valid entrypoint.");
         }
 
-#pragma omp parallel
-        {
-            VisitedTable vt(ntotal);
-            std::unique_ptr<DistanceComputer> dis(get_distance_computer());
-            HNSWStats search_stats;
-            RH::SingleResultHandler res(bres);
+        if (params && params->grp) {
+            using RH = GroupedHeapBlockResultHandler<HNSW::C>;
+            RH bres(n, distances_f, labels, k, params->grp);
 
-#pragma omp for
-            for (idx_t i = 0; i < n; i++) {
-                res.begin(i);
-                dis->set_query((float*)(x + i * code_size));
+            hnsw_search_level_0(
+                    this,
+                    n,
+                    x,
+                    k,
+                    nearest.data(),
+                    nearest_d.data(),
+                    distances_f,
+                    labels,
+                    params,
+                    bres);
+        } else {
+            using RH = HeapBlockResultHandler<HNSW::C>;
+            RH bres(n, distances_f, labels, k);
 
-                hnsw.search_level_0(
-                        *dis,
-                        res,
-                        1,
-                        &nearest[i],
-                        &nearest_d[i],
-                        1, // search_type
-                        search_stats,
-                        vt,
-                        params);
-
-                res.end();
-            }
+            hnsw_search_level_0(
+                    this,
+                    n,
+                    x,
+                    k,
+                    nearest.data(),
+                    nearest_d.data(),
+                    distances_f,
+                    labels,
+                    params,
+                    bres);
         }
 
 #pragma omp parallel for
         for (int i = 0; i < n * k; ++i) {
             distances[i] = std::round(distances_f[i]);
         }
-    }
+    }  // End if
 }
 
 } // namespace faiss
