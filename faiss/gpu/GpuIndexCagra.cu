@@ -406,7 +406,9 @@ void GpuIndexCagra::copyFrom(const faiss::IndexHNSWCagra* index) {
     copyFrom_ex(index, NumericType::Float32);
 }
 
-void GpuIndexCagra::copyTo(faiss::IndexHNSWCagra* index) const {
+void GpuIndexCagra::copyTo(
+        faiss::IndexHNSWCagra* index,
+        bool skip_storage) const {
     FAISS_ASSERT(
             !std::holds_alternative<std::monostate>(index_) &&
             this->is_trained && index);
@@ -469,7 +471,12 @@ void GpuIndexCagra::copyTo(faiss::IndexHNSWCagra* index) const {
     auto n_train = this->ntotal;
     bool allocation = false;
 
-    if (numeric_type_ == NumericType::Float32) {
+    // turn off as level 0 is copied from CAGRA graph
+    index->init_level0 = false;
+    if (skip_storage) {
+        index->hnsw.prepare_level_tab(n_train, false);
+        index->ntotal = n_train;
+    } else if (numeric_type_ == NumericType::Float32) {
         float* train_dataset;
         const float* dataset =
                 std::get<std::shared_ptr<CuvsCagra<float>>>(index_)
@@ -487,8 +494,6 @@ void GpuIndexCagra::copyTo(faiss::IndexHNSWCagra* index) const {
             train_dataset = const_cast<float*>(dataset);
         }
 
-        // turn off as level 0 is copied from CAGRA graph
-        index->init_level0 = false;
         if (!index->base_level_only) {
             index->add(n_train, train_dataset);
         } else {
@@ -516,7 +521,6 @@ void GpuIndexCagra::copyTo(faiss::IndexHNSWCagra* index) const {
             train_dataset = const_cast<half*>(dataset);
         }
 
-        index->init_level0 = false;
         if (!index->base_level_only) {
             FAISS_THROW_MSG(
                     "Only base level copy is supported for FP16 types in GpuIndexCagra::copyTo");
@@ -548,7 +552,6 @@ void GpuIndexCagra::copyTo(faiss::IndexHNSWCagra* index) const {
             train_dataset = const_cast<int8_t*>(dataset);
         }
 
-        index->init_level0 = false;
         if (!index->base_level_only) {
             FAISS_THROW_MSG(
                     "Only base level copy is supported for Int8 types in GpuIndexCagra::copyTo");

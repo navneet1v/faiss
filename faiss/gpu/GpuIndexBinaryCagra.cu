@@ -312,7 +312,9 @@ void GpuIndexBinaryCagra::copyFrom(const faiss::IndexBinaryHNSWCagra* index) {
     this->is_trained = true;
 }
 
-void GpuIndexBinaryCagra::copyTo(faiss::IndexBinaryHNSWCagra* index) const {
+void GpuIndexBinaryCagra::copyTo(
+        faiss::IndexBinaryHNSWCagra* index,
+        bool skip_storage) const {
     FAISS_ASSERT(index_ && this->is_trained && index);
 
     DeviceScope scope(cagraConfig_.device);
@@ -342,19 +344,24 @@ void GpuIndexBinaryCagra::copyTo(faiss::IndexBinaryHNSWCagra* index) const {
     auto n_train = this->ntotal;
     auto stream = resources_->getDefaultStream(cagraConfig_.device);
 
-    auto train_dataset = toHost<uint8_t, 2>(
-            const_cast<uint8_t*>(index_->get_training_dataset()),
-            stream,
-            {idx_t(n_train), this->d / 8});
-
     // turn off as level 0 is copied from CAGRA graph
     index->init_level0 = false;
-    if (!index->base_level_only) {
-        index->add(n_train, train_dataset.data());
-    } else {
+    if (skip_storage) {
         index->hnsw.prepare_level_tab(n_train, false);
-        index->storage->add(n_train, train_dataset.data());
         index->ntotal = n_train;
+    } else {
+        auto train_dataset = toHost<uint8_t, 2>(
+                const_cast<uint8_t*>(index_->get_training_dataset()),
+                stream,
+                {idx_t(n_train), this->d / 8});
+
+        if (!index->base_level_only) {
+            index->add(n_train, train_dataset.data());
+        } else {
+            index->hnsw.prepare_level_tab(n_train, false);
+            index->storage->add(n_train, train_dataset.data());
+            index->ntotal = n_train;
+        }
     }
 
     auto graph = get_knngraph();

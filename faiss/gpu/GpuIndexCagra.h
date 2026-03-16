@@ -281,8 +281,11 @@ struct GpuIndexCagra : public GpuIndex {
             NumericType numeric_type);
 
     /// Copy ourselves to the given CPU index; will overwrite all data
-    /// in the index instance
-    void copyTo(faiss::IndexHNSWCagra* index) const;
+    /// in the index instance. If skip_storage is true, vectors are not
+    /// copied to the flat storage, reducing CPU memory usage.
+    void copyTo(
+            faiss::IndexHNSWCagra* index,
+            bool skip_storage = false) const;
 
     void reset() override;
 

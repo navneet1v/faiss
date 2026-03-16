@@ -3027,7 +3027,9 @@ std::unique_ptr<IndexBinary> read_index_binary_up(IOReader* f, int io_flags) {
     std::unique_ptr<IndexBinary> idx;
     uint32_t h;
     READ1(h);
-    if (h == fourcc("IBxF")) {
+    if (h == fourcc("null")) {
+        return nullptr;
+    } else if (h == fourcc("IBxF")) {
         auto idxf = std::make_unique<IndexBinaryFlat>();
         read_index_binary_header(*idxf, f);
         read_vector(idxf->xb, f);

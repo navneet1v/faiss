@@ -67,8 +67,11 @@ struct GpuIndexBinaryCagra : public IndexBinary {
     void copyFrom(const faiss::IndexBinaryHNSWCagra* index);
 
     /// Copy ourselves to the given CPU index; will overwrite all data
-    /// in the index instance
-    void copyTo(faiss::IndexBinaryHNSWCagra* index) const;
+    /// in the index instance. If skip_storage is true, vectors are not
+    /// copied to the flat storage, reducing CPU memory usage.
+    void copyTo(
+            faiss::IndexBinaryHNSWCagra* index,
+            bool skip_storage = false) const;
 
     void reset() override;
 
