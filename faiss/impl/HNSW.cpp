@@ -945,10 +945,20 @@ HNSWStats HNSW::search(
         ResultHandler<C>& res,
         VisitedTable& vt,
         const SearchParameters* params) const {
+    return search_with_entry_point(qdis, res, vt, params, -1);
+}
+
+HNSWStats HNSW::search_with_entry_point(
+        DistanceComputer& qdis,
+        ResultHandler<C>& res,
+        VisitedTable& vt,
+        const SearchParameters* params,
+        storage_idx_t passed_entry_point) const {
     HNSWStats stats;
-    if (entry_point == -1) {
+    if (entry_point == -1 && passed_entry_point == -1) {
         return stats;
     }
+    storage_idx_t nearest = entry_point == -1 ? passed_entry_point : entry_point;
     int k = extract_k_from_ResultHandler(res);
 
     bool bounded_queue = this->search_bounded_queue;
@@ -962,7 +972,7 @@ HNSWStats HNSW::search(
     }
 
     //  greedy search on upper levels
-    storage_idx_t nearest = entry_point;
+
     float d_nearest = qdis(nearest);
 
     for (int level = max_level; level >= 1; level--) {

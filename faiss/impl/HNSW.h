@@ -203,6 +203,12 @@ struct HNSW {
             VisitedTable& vt,
             const SearchParameters* params = nullptr) const;
 
+    HNSWStats search_with_entry_point(
+            DistanceComputer& qdis,
+            ResultHandler<C>& res,
+            VisitedTable& vt,
+            const SearchParameters* params = nullptr, storage_idx_t passed_entry_point = -1) const;
+
     /// search only in level 0 from a given vertex
     void search_level_0(
             DistanceComputer& qdis,

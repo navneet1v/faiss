@@ -122,8 +122,13 @@ struct IndexHNSW : Index {
     void link_singletons();
 
     void permute_entries(const idx_t* perm);
-
     DistanceComputer* get_distance_computer() const override;
+
+    void range_search_with_entry_point(idx_t n,
+        const float* x,
+        float radius,
+        RangeSearchResult* result,
+        const SearchParameters* params=nullptr, const storage_idx_t* entryPoints=nullptr) const;
 };
 
 /** Flat index topped with with a HNSW structure to access elements
@@ -232,6 +237,13 @@ struct IndexHNSWCagra : IndexHNSW {
     faiss::NumericType get_numeric_type() const;
     void set_numeric_type(faiss::NumericType numeric_type);
     NumericType numeric_type_;
+
+    void range_search(
+        idx_t n,
+        const float* x,
+        float radius,
+        RangeSearchResult* result,
+        const SearchParameters* params = nullptr) const override;
 };
 
 } // namespace faiss
