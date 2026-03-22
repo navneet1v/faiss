@@ -41,6 +41,7 @@ set(FAISS_TEST_SRC
   test_mmap.cpp
   test_zerocopy.cpp
   test_ivfpq_share_table.cpp
+  test_hnsw_cagra_range_search.cpp
 )
 
 add_executable(faiss_test ${FAISS_TEST_SRC})

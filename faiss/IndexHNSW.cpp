@@ -29,6 +29,7 @@
 #include <faiss/impl/ResultHandler.h>
 #include <faiss/utils/random.h>
 #include <faiss/utils/sorting.h>
+#include <sys/stat.h>
 
 namespace faiss {
 
@@ -240,11 +241,12 @@ void IndexHNSW::train(idx_t n, const void* x, NumericType numeric_type) {
 namespace {
 
 template <class BlockResultHandler>
-void hnsw_search(
+void hnsw_search_with_entry_points(
         const IndexHNSW* index,
         idx_t n,
         const float* x,
         BlockResultHandler& bres,
+        const storage_idx_t* entryPoints,
         const SearchParameters* params) {
     FAISS_THROW_IF_NOT_MSG(
             index->storage,
@@ -279,8 +281,14 @@ void hnsw_search(
             for (idx_t i = i0; i < i1; i++) {
                 res.begin(i);
                 dis->set_query(x + i * index->d);
+                HNSWStats stats;
+                if (entryPoints != nullptr) {
+                    // It is assumed that entryPoints array has the same layout as the data, i.e. entryPoints[i] corresponds to the i-th vector being searched.
+                    stats = hnsw.search_with_entry_point(*dis, res, vt, params, entryPoints[i]);
+                } else {
+                    stats = hnsw.search_with_entry_point(*dis, res, vt, params);
+                }
 
-                HNSWStats stats = hnsw.search(*dis, res, vt, params);
                 n1 += stats.n1;
                 n2 += stats.n2;
                 ndis += stats.ndis;
@@ -292,6 +300,16 @@ void hnsw_search(
     }
 
     hnsw_stats.combine({n1, n2, ndis, nhops});
+}
+
+template <class BlockResultHandler>
+void hnsw_search(
+        const IndexHNSW* index,
+        idx_t n,
+        const float* x,
+        BlockResultHandler& bres,
+        const SearchParameters* params) {
+    hnsw_search_with_entry_points(index, n, x, bres, nullptr, params);
 }
 
 template <class BlockResultHandler>
@@ -397,10 +415,18 @@ void IndexHNSW::range_search(
         float radius,
         RangeSearchResult* result,
         const SearchParameters* params) const {
+    range_search_with_entry_point(n, x, radius, result, params, nullptr);
+}
+
+void IndexHNSW::range_search_with_entry_point(idx_t n,
+        const float* x,
+        float radius,
+        RangeSearchResult* result,
+        const SearchParameters* params, const storage_idx_t* entryPoints) const {
     using RH = RangeSearchBlockResultHandler<HNSW::C>;
     RH bres(result, is_similarity_metric(metric_type) ? -radius : radius);
 
-    hnsw_search(this, n, x, bres, params);
+    hnsw_search_with_entry_points(this, n, x, bres, entryPoints, params);
 
     if (is_similarity_metric(this->metric_type)) {
         // we need to revert the negated distances
@@ -1121,6 +1147,45 @@ faiss::NumericType IndexHNSWCagra::get_numeric_type() const {
 
 void IndexHNSWCagra::set_numeric_type(faiss::NumericType numeric_type) {
     numeric_type_ = numeric_type;
+}
+
+
+void IndexHNSWCagra::range_search(
+        idx_t n,
+        const float* x,
+        float radius,
+        RangeSearchResult* result,
+        const SearchParameters* params) const {
+    if (!base_level_only) {
+        IndexHNSW::range_search(n, x, radius, result, params);
+    } else {
+        std::vector<storage_idx_t> nearest(n);
+        std::vector<float> nearest_d(n);
+#pragma omp for
+        for (idx_t i = 0; i < n; i++) {
+            std::unique_ptr<DistanceComputer> dis(
+                    storage_distance_computer(this->storage));
+            dis->set_query(x + i * d);
+            nearest[i] = -1;
+            nearest_d[i] = std::numeric_limits<float>::max();
+
+            std::random_device rd;
+            std::mt19937 gen(rd());
+            std::uniform_int_distribution<idx_t> distrib(0, this->ntotal-1);
+
+            for (idx_t j = 0; j < num_base_level_search_entrypoints; j++) {
+                auto idx = distrib(gen);
+                auto distance = (*dis)(idx);
+                if (distance < nearest_d[i]) {
+                    nearest[i] = idx;
+                    nearest_d[i] = distance;
+                }
+            }
+            FAISS_THROW_IF_NOT_MSG(
+                    nearest[i] >= 0, "Could not find a valid entrypoint.");
+        }
+        range_search_with_entry_point(n, x, radius, result, params, nearest.data());
+    }
 }
 
 } // namespace faiss
