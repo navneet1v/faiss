@@ -28,12 +28,18 @@
 #include <faiss/gpu/GpuResources.h>
 #include <faiss/gpu/StandardGpuResources.h>
 #include <faiss/gpu/test/TestUtils.h>
+#include <faiss/impl/HNSW.h>
 #include <faiss/impl/IDSelector.h>
 #include <faiss/utils/distances.h>
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <faiss/gpu/utils/CopyUtils.cuh>
 #include <faiss/gpu/utils/DeviceTensor.cuh>
 #include <optional>
+#include <queue>
+#include <random>
+#include <unordered_set>
 #include <vector>
 
 #include <raft/core/resource/cuda_stream.hpp>
@@ -941,6 +947,343 @@ TEST(TestGpuIndexCagra, IDSelector_L2) {
 
 TEST(TestGpuIndexCagra, IDSelector_IP) {
     testIDSelectorCagra(faiss::METRIC_INNER_PRODUCT);
+}
+
+//
+// Upper-level projection: GpuIndexCagra::copyTo(...,
+// CagraUpperLevelProjectionParams)
+//
+
+namespace {
+
+// Well-separated clusters: the exact k-NN graph of this data is disconnected
+// across clusters, so a CAGRA graph built from it splits into many components.
+constexpr faiss::idx_t kProjN = 20000;
+constexpr int kProjDim = 64;
+constexpr int kProjClusters = 100;
+constexpr int kProjGraphDegree = 32;
+constexpr int kProjM = 8; // HNSW m: layer 1 with 2 * m links, promotion 1/(2m)
+
+std::vector<float> clusteredVecs(
+        faiss::idx_t n,
+        int d,
+        int nclusters,
+        float sigma,
+        std::vector<int>* labels,
+        unsigned seed) {
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> normal(0.0f, 1.0f);
+    std::uniform_int_distribution<int> pick(0, nclusters - 1);
+    std::vector<float> centers(size_t(nclusters) * d);
+    for (auto& v : centers) {
+        v = normal(rng);
+    }
+    faiss::fvec_renorm_L2(d, nclusters, centers.data());
+    std::vector<float> x(size_t(n) * d);
+    if (labels) {
+        labels->resize(n);
+    }
+    for (faiss::idx_t i = 0; i < n; i++) {
+        int c = pick(rng);
+        if (labels) {
+            (*labels)[i] = c;
+        }
+        for (int j = 0; j < d; j++) {
+            x[i * d + j] = centers[c * d + j] +
+                    sigma / std::sqrt(float(d)) * normal(rng);
+        }
+    }
+    return x;
+}
+
+faiss::gpu::GpuIndexCagraConfig projectionConfig() {
+    faiss::gpu::GpuIndexCagraConfig config;
+    config.graph_degree = kProjGraphDegree;
+    config.intermediate_graph_degree = kProjGraphDegree;
+    config.build_algo = faiss::gpu::graph_build_algo::IVF_PQ;
+    // the projection reads the caller's host array: store_dataset must be false
+    config.store_dataset = false;
+    return config;
+}
+
+faiss::gpu::CagraUpperLevelProjectionParams projectionParams() {
+    faiss::gpu::CagraUpperLevelProjectionParams params;
+    params.M = kProjM;
+    return params;
+}
+
+// level-0 neighbour rows of a CPU index, [ntotal][nb0]
+std::vector<std::vector<int32_t>> level0Rows(
+        const faiss::IndexHNSWCagra& index) {
+    std::vector<std::vector<int32_t>> rows(index.ntotal);
+    for (faiss::idx_t i = 0; i < index.ntotal; i++) {
+        size_t b, e;
+        index.hnsw.neighbor_range(i, 0, &b, &e);
+        rows[i].assign(
+                index.hnsw.neighbors.begin() + b,
+                index.hnsw.neighbors.begin() + e);
+    }
+    return rows;
+}
+
+// number of nodes reachable from `start` following level-0 out-edges
+faiss::idx_t reachableFrom(
+        const std::vector<std::vector<int32_t>>& rows,
+        faiss::idx_t start) {
+    std::vector<char> seen(rows.size(), 0);
+    std::queue<faiss::idx_t> q;
+    q.push(start);
+    seen[start] = 1;
+    faiss::idx_t count = 1;
+    while (!q.empty()) {
+        faiss::idx_t a = q.front();
+        q.pop();
+        for (int32_t b : rows[a]) {
+            if (b >= 0 && !seen[b]) {
+                seen[b] = 1;
+                count++;
+                q.push(b);
+            }
+        }
+    }
+    return count;
+}
+
+// recall@k of base-level-only search vs exact search
+double baseLevelRecall(
+        faiss::IndexHNSWCagra& index,
+        const std::vector<float>& base,
+        const std::vector<float>& queries,
+        faiss::idx_t nq,
+        int k) {
+    std::vector<float> refD(nq * k), D(nq * k);
+    std::vector<faiss::idx_t> refI(nq * k), I(nq * k);
+    faiss::knn_L2sqr(
+            queries.data(),
+            base.data(),
+            kProjDim,
+            nq,
+            kProjN,
+            k,
+            refD.data(),
+            refI.data());
+    faiss::SearchParametersHNSW sp;
+    sp.efSearch = 64;
+    index.search(nq, queries.data(), k, D.data(), I.data(), &sp);
+    size_t hits = 0;
+    for (faiss::idx_t q = 0; q < nq; q++) {
+        std::unordered_set<faiss::idx_t> ref(
+                refI.begin() + q * k, refI.begin() + (q + 1) * k);
+        for (int j = 0; j < k; j++) {
+            hits += ref.count(I[q * k + j]);
+        }
+    }
+    return double(hits) / double(nq * k);
+}
+
+} // namespace
+
+TEST(TestGpuIndexCagra, UpperLevelProjection_ConnectsClusteredGraph) {
+    std::vector<float> base =
+            clusteredVecs(kProjN, kProjDim, kProjClusters, 0.3f, nullptr, 1);
+    faiss::gpu::StandardGpuResources res;
+    faiss::gpu::GpuIndexCagra gpuIndex(
+            &res, kProjDim, faiss::METRIC_L2, projectionConfig());
+    gpuIndex.train(kProjN, base.data());
+
+    faiss::IndexHNSWCagra plain, projected;
+    plain.base_level_only = true;
+    projected.base_level_only = true;
+    gpuIndex.copyTo(&plain);
+    auto params = projectionParams();
+    faiss::gpu::CagraUpperLevelProjectionStats stats;
+    gpuIndex.copyTo(&projected, false, &params, &stats);
+
+    auto plainRows = level0Rows(plain);
+    auto projectedRows = level0Rows(projected);
+    // precondition: the data really fragments the plain CAGRA graph
+    ASSERT_LT(reachableFrom(plainRows, 0), kProjN / 2);
+    // with the projection every sampled start reaches every node
+    std::mt19937 rng(7);
+    std::uniform_int_distribution<faiss::idx_t> pick(0, kProjN - 1);
+    for (int t = 0; t < 10; t++) {
+        EXPECT_EQ(reachableFrom(projectedRows, pick(rng)), kProjN);
+    }
+    EXPECT_GT(stats.promoted, 0);
+    EXPECT_GT(stats.added_by_overwrite, 0);
+
+    // search quality: fresh queries from the same clusters (same seed => the
+    // same centers and the same first kProjN points, then nq new points)
+    faiss::idx_t nq = 200;
+    std::vector<float> fresh = clusteredVecs(
+            kProjN + nq, kProjDim, kProjClusters, 0.3f, nullptr, 1);
+    std::vector<float> queries(fresh.begin() + kProjN * kProjDim, fresh.end());
+    double plainRecall = baseLevelRecall(plain, base, queries, nq, 10);
+    double projectedRecall = baseLevelRecall(projected, base, queries, nq, 10);
+    EXPECT_GE(projectedRecall, 0.9);
+    EXPECT_GT(projectedRecall, plainRecall);
+}
+
+TEST(TestGpuIndexCagra, UpperLevelProjection_RowInvariantsAndStats) {
+    std::vector<float> base =
+            clusteredVecs(kProjN, kProjDim, kProjClusters, 0.3f, nullptr, 2);
+    faiss::gpu::StandardGpuResources res;
+    faiss::gpu::GpuIndexCagra gpuIndex(
+            &res, kProjDim, faiss::METRIC_L2, projectionConfig());
+    gpuIndex.train(kProjN, base.data());
+
+    faiss::IndexHNSWCagra plain, projected;
+    plain.base_level_only = true;
+    projected.base_level_only = true;
+    gpuIndex.copyTo(&plain);
+    auto params = projectionParams();
+    faiss::gpu::CagraUpperLevelProjectionStats stats;
+    gpuIndex.copyTo(&projected, false, &params, &stats);
+
+    auto plainRows = level0Rows(plain);
+    auto projectedRows = level0Rows(projected);
+    const int nb0 = plainRows[0].size();
+    const int cap = int(params.max_share * nb0);
+    size_t changed = 0;
+    for (faiss::idx_t i = 0; i < kProjN; i++) {
+        int diff = 0;
+        std::unordered_set<int32_t> seen;
+        bool plainHasDup = false;
+        {
+            std::unordered_set<int32_t> s;
+            for (int32_t v : plainRows[i]) {
+                if (v >= 0 && !s.insert(v).second) {
+                    plainHasDup = true;
+                }
+            }
+        }
+        for (int j = 0; j < nb0; j++) {
+            int32_t v = projectedRows[i][j];
+            ASSERT_GE(v, -1);
+            ASSERT_LT(v, kProjN);
+            diff += v != plainRows[i][j];
+            if (!plainHasDup && v >= 0) {
+                EXPECT_TRUE(seen.insert(v).second)
+                        << "duplicate link in row " << i;
+            }
+        }
+        EXPECT_LE(diff, cap) << "row " << i;
+        changed += diff;
+    }
+    EXPECT_EQ(changed, stats.added_by_overwrite + stats.added_into_empty);
+
+    // promotion is faiss's HNSW level draw for an HNSW with 2 * M links
+    faiss::HNSW draw(2 * kProjM);
+    draw.assign_probas.clear();
+    draw.cum_nneighbor_per_level.clear();
+    draw.set_default_probas(2 * kProjM, 1.0f / std::log(2 * kProjM));
+    faiss::idx_t expectedPromoted = 0;
+    for (faiss::idx_t i = 0; i < kProjN; i++) {
+        expectedPromoted += draw.random_level() >= 1;
+    }
+    EXPECT_EQ(stats.promoted, expectedPromoted);
+
+    // protect_last_in_edge: the projection never makes a node unreachable
+    EXPECT_EQ(stats.in_degree0_after, stats.in_degree0_before);
+    EXPECT_EQ(stats.rows_not_full, 0); // CAGRA rows are full
+}
+
+TEST(TestGpuIndexCagra, UpperLevelProjection_MaxShareZeroAndNullParams) {
+    std::vector<float> base =
+            clusteredVecs(kProjN, kProjDim, kProjClusters, 0.3f, nullptr, 3);
+    faiss::gpu::StandardGpuResources res;
+    faiss::gpu::GpuIndexCagra gpuIndex(
+            &res, kProjDim, faiss::METRIC_L2, projectionConfig());
+    gpuIndex.train(kProjN, base.data());
+
+    faiss::IndexHNSWCagra plain, nullParams, zeroShare;
+    plain.base_level_only = nullParams.base_level_only =
+            zeroShare.base_level_only = true;
+    gpuIndex.copyTo(&plain);
+    gpuIndex.copyTo(&nullParams, false, nullptr);
+    auto params = projectionParams();
+    params.max_share = 0;
+    faiss::gpu::CagraUpperLevelProjectionStats stats;
+    gpuIndex.copyTo(&zeroShare, false, &params, &stats);
+
+    // no projection params: identical to the existing copyTo
+    EXPECT_EQ(level0Rows(nullParams), level0Rows(plain));
+    // max_share = 0 on full rows: nothing is overwritten
+    EXPECT_EQ(level0Rows(zeroShare), level0Rows(plain));
+    EXPECT_EQ(stats.added_by_overwrite, 0);
+    EXPECT_GT(stats.skipped_cap, 0);
+}
+
+TEST(TestGpuIndexCagra, UpperLevelProjection_InvalidParamsThrow) {
+    std::vector<float> base =
+            clusteredVecs(5000, kProjDim, 20, 0.3f, nullptr, 4);
+    faiss::gpu::StandardGpuResources res;
+    faiss::gpu::GpuIndexCagra gpuIndex(
+            &res, kProjDim, faiss::METRIC_L2, projectionConfig());
+    gpuIndex.train(5000, base.data());
+
+    {
+        faiss::IndexHNSWCagra cpu;
+        cpu.base_level_only = true;
+        auto params = projectionParams();
+        params.M = 0; // M is required
+        EXPECT_THROW(
+                gpuIndex.copyTo(&cpu, false, &params), faiss::FaissException);
+    }
+    {
+        faiss::IndexHNSWCagra cpu;
+        cpu.base_level_only = true;
+        auto params = projectionParams();
+        params.max_share = 1.5f;
+        EXPECT_THROW(
+                gpuIndex.copyTo(&cpu, false, &params), faiss::FaissException);
+    }
+    {
+        faiss::IndexHNSWCagra cpu;
+        cpu.base_level_only =
+                false; // the projection keeps the index base-level only
+        auto params = projectionParams();
+        EXPECT_THROW(
+                gpuIndex.copyTo(&cpu, false, &params), faiss::FaissException);
+    }
+    {
+        auto config = projectionConfig();
+        config.store_dataset = true; // not supported with the projection
+        faiss::gpu::GpuIndexCagra storing(
+                &res, kProjDim, faiss::METRIC_L2, config);
+        storing.train(5000, base.data());
+        faiss::IndexHNSWCagra cpu;
+        cpu.base_level_only = true;
+        auto params = projectionParams();
+        EXPECT_THROW(
+                storing.copyTo(&cpu, false, &params), faiss::FaissException);
+    }
+}
+
+TEST(TestGpuIndexCagra, UpperLevelProjection_Float16AndSkipStorage) {
+    std::vector<float> base =
+            clusteredVecs(kProjN, kProjDim, kProjClusters, 0.3f, nullptr, 5);
+    std::vector<half> baseHalf(base.size());
+    for (size_t i = 0; i < base.size(); i++) {
+        baseHalf[i] = __float2half(base[i]);
+    }
+    faiss::gpu::StandardGpuResources res;
+    faiss::gpu::GpuIndexCagra gpuIndex(
+            &res, kProjDim, faiss::METRIC_L2, projectionConfig());
+    gpuIndex.train_ex(kProjN, baseHalf.data(), faiss::NumericType::Float16);
+
+    for (bool skipStorage : {false, true}) {
+        faiss::IndexHNSWCagra cpu;
+        cpu.base_level_only = true;
+        auto params = projectionParams();
+        faiss::gpu::CagraUpperLevelProjectionStats stats;
+        gpuIndex.copyTo(&cpu, skipStorage, &params, &stats);
+        auto rows = level0Rows(cpu);
+        EXPECT_EQ(reachableFrom(rows, 0), kProjN)
+                << "skip_storage=" << skipStorage;
+        EXPECT_GT(stats.added_by_overwrite, 0);
+        EXPECT_EQ(stats.in_degree0_after, stats.in_degree0_before);
+    }
 }
 
 int main(int argc, char** argv) {

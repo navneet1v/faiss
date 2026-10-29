@@ -250,6 +250,47 @@ struct SearchParametersCagra : SearchParameters {
     uint64_t seed = 0x128394;
 };
 
+/// Optional step of GpuIndexCagra::copyTo for base-level-only conversions:
+/// build an HNSW layer 1 over a promoted subset of the vectors and project its
+/// links into the CAGRA base layer (level 0). On data made of well-separated
+/// clusters the CAGRA graph inherits the disconnected clusters of the k-NN
+/// graph it is pruned from; HNSW insertion creates near-neighbour links between
+/// clusters, which this step adds to level 0. The output stays base-level only
+/// and the file format is unchanged.
+struct CagraUpperLevelProjectionParams {
+    /// HNSW m of the index (required, > 0). Layer 1 is built like an HNSW
+    /// with 2 * M links per node, and a node is promoted to it with
+    /// probability 1 / (2 * M), drawn by faiss's HNSW level generator
+    /// (HNSW::random_level, seed 12345).
+    int M = 0;
+    /// efConstruction for the layer-1 build. 0 = index->hnsw.efConstruction.
+    int ef_construction = 0;
+    /// At most this share of a node's level-0 links may be overwritten by
+    /// projected links (tail slots first). Rows that are not full to begin
+    /// with are not capped (they may take links up to their full width).
+    float max_share = 0.5f;
+    /// Never overwrite a link that is the last level-0 in-edge of its target,
+    /// so the projection never makes a node unreachable.
+    bool protect_last_in_edge = true;
+};
+
+/// Counters reported by the projection step (optional output of copyTo).
+struct CagraUpperLevelProjectionStats {
+    idx_t promoted = 0;
+    size_t added_into_empty = 0;
+    size_t added_by_overwrite = 0;
+    size_t already_present = 0;
+    size_t skipped_cap = 0;
+    size_t protected_slots_skipped = 0;
+    size_t skipped_no_free_slot = 0;
+    /// level-0 rows that had empty slots before the projection (cap = 100%)
+    size_t rows_not_full = 0;
+    idx_t in_degree0_before = 0;
+    idx_t in_degree0_after = 0;
+    double layer1_build_ms = 0;
+    double projection_ms = 0;
+};
+
 struct GpuIndexCagra : public GpuIndex {
    public:
     GpuIndexCagra(
@@ -286,6 +327,15 @@ struct GpuIndexCagra : public GpuIndex {
     void copyTo(
             faiss::IndexHNSWCagra* index,
             bool skip_storage = false) const;
+
+    /// Same as above; if `projection` is not null (requires
+    /// index->base_level_only), also projects HNSW layer-1 links into level 0
+    /// (see CagraUpperLevelProjectionParams). `stats` is optional.
+    void copyTo(
+            faiss::IndexHNSWCagra* index,
+            bool skip_storage,
+            const CagraUpperLevelProjectionParams* projection,
+            CagraUpperLevelProjectionStats* stats = nullptr) const;
 
     void reset() override;
 

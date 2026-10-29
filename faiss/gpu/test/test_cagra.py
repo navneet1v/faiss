@@ -223,3 +223,179 @@ class TestIDMapCagra(unittest.TestCase):
 
     def test_IDMapCagra_IP_Int8(self):
         self.do_IDMapCagra(faiss.METRIC_INNER_PRODUCT, faiss.Int8)
+
+
+def clustered_vectors(n, d, nclusters, sigma, seed):
+    """Well-separated clusters: the exact k-NN graph is disconnected across clusters."""
+    rng = np.random.default_rng(seed)
+    centers = rng.standard_normal((nclusters, d)).astype(np.float32)
+    centers /= np.linalg.norm(centers, axis=1, keepdims=True)
+    labels = rng.integers(0, nclusters, n)
+    noise = rng.standard_normal((n, d)).astype(np.float32) * (sigma / np.sqrt(d))
+    return np.ascontiguousarray(centers[labels] + noise, dtype=np.float32)
+
+
+def level0_rows(cpu_index):
+    """Level-0 neighbour lists of an IndexHNSWCagra, shape [ntotal, nb0]."""
+    hnsw = cpu_index.hnsw
+    n = cpu_index.ntotal
+    neighbors = faiss.vector_to_array(hnsw.neighbors)
+    offsets = faiss.vector_to_array(hnsw.offsets).astype(np.int64)
+    nb0 = hnsw.nb_neighbors(0)
+    return neighbors[offsets[:n, None] + np.arange(nb0)[None, :]]
+
+
+def reachable_from(rows, start):
+    """Number of nodes reachable from `start` following level-0 out-edges."""
+    seen = np.zeros(len(rows), dtype=bool)
+    seen[start] = True
+    frontier = np.array([start])
+    while len(frontier):
+        nxt = rows[frontier].ravel()
+        nxt = np.unique(nxt[nxt >= 0])
+        nxt = nxt[~seen[nxt]]
+        seen[nxt] = True
+        frontier = nxt
+    return int(seen.sum())
+
+
+@unittest.skipIf(
+    "CUVS" not in faiss.get_compile_options(), "only if cuVS is compiled in"
+)
+class TestCagraUpperLevelProjection(unittest.TestCase):
+    """GpuIndexCagra.copyTo(cpu_index, skip_storage, CagraUpperLevelProjectionParams)"""
+
+    n, d, nclusters, graph_degree, m = 20000, 64, 100, 32, 8
+
+    def build(self, x, numeric_type=faiss.Float32, store_dataset=False):
+        cfg = faiss.GpuIndexCagraConfig()
+        cfg.graph_degree = self.graph_degree
+        cfg.intermediate_graph_degree = self.graph_degree
+        cfg.build_algo = faiss.graph_build_algo_IVF_PQ
+        # the projection reads the caller's host array: store_dataset must be False
+        cfg.store_dataset = store_dataset
+        self.res = faiss.StandardGpuResources()
+        gpu_index = faiss.GpuIndexCagra(self.res, self.d, faiss.METRIC_L2, cfg)
+        gpu_index.train(x, numeric_type=numeric_type)
+        return gpu_index
+
+    def params(self, **kwargs):
+        p = faiss.CagraUpperLevelProjectionParams()
+        p.M = self.m
+        for k, v in kwargs.items():
+            setattr(p, k, v)
+        return p
+
+    @staticmethod
+    def copy(gpu_index, params=None, skip_storage=False, stats=None):
+        cpu = faiss.IndexHNSWCagra()
+        cpu.base_level_only = True
+        if params is None:
+            gpu_index.copyTo(cpu)
+        else:
+            gpu_index.copyTo(cpu, skip_storage, params, stats)
+        return cpu
+
+    def test_connects_clustered_graph(self):
+        xb = clustered_vectors(self.n + 200, self.d, self.nclusters, 0.3, 1)
+        xb, xq = xb[: self.n], xb[self.n:]
+        x = np.ascontiguousarray(xb)
+        gpu_index = self.build(x)
+        plain = self.copy(gpu_index)
+        stats = faiss.CagraUpperLevelProjectionStats()
+        projected = self.copy(gpu_index, self.params(), stats=stats)
+
+        plain_rows, projected_rows = level0_rows(plain), level0_rows(projected)
+        # precondition: the data really fragments the plain CAGRA graph
+        self.assertLess(reachable_from(plain_rows, 0), self.n // 2)
+        for start in np.random.default_rng(7).integers(0, self.n, 10):
+            self.assertEqual(reachable_from(projected_rows, int(start)), self.n)
+        self.assertGreater(stats.promoted, 0)
+        self.assertGreater(stats.added_by_overwrite, 0)
+
+        # base-level-only search recall@10 vs exact
+        k = 10
+        _, Iref = faiss.knn(xq, x, k)
+        params = faiss.SearchParametersHNSW(efSearch=64)
+
+        def recall(index):
+            _, I = index.search(xq, k, params=params)
+            return np.mean([len(set(I[i]) & set(Iref[i])) / k for i in range(len(xq))])
+
+        projected_recall = recall(projected)
+        self.assertGreaterEqual(projected_recall, 0.9)
+        self.assertGreater(projected_recall, recall(plain))
+
+    def test_row_invariants_and_stats(self):
+        x = clustered_vectors(self.n, self.d, self.nclusters, 0.3, 2)
+        gpu_index = self.build(x)
+        plain = self.copy(gpu_index)
+        stats = faiss.CagraUpperLevelProjectionStats()
+        params = self.params()
+        projected = self.copy(gpu_index, params, stats=stats)
+
+        plain_rows, projected_rows = level0_rows(plain), level0_rows(projected)
+        nb0 = plain_rows.shape[1]
+        cap = int(params.max_share * nb0)
+        changed = (plain_rows != projected_rows).sum(axis=1)
+        self.assertLessEqual(int(changed.max()), cap)
+        self.assertEqual(int(changed.sum()), stats.added_by_overwrite + stats.added_into_empty)
+        self.assertTrue(((projected_rows >= -1) & (projected_rows < self.n)).all())
+        for i in range(self.n):  # no duplicates are introduced
+            row = projected_rows[i][projected_rows[i] >= 0]
+            plain_row = plain_rows[i][plain_rows[i] >= 0]
+            if len(np.unique(plain_row)) == len(plain_row):
+                self.assertEqual(len(np.unique(row)), len(row))
+
+        # promotion is faiss's HNSW level draw for an HNSW with 2 * M links
+        draw = faiss.HNSW(2 * self.m)
+        draw.assign_probas.clear()
+        draw.cum_nneighbor_per_level.clear()
+        draw.set_default_probas(2 * self.m, 1.0 / np.log(2 * self.m))
+        expected = sum(draw.random_level() >= 1 for _ in range(self.n))
+        self.assertEqual(stats.promoted, expected)
+
+        # protect_last_in_edge: no node becomes unreachable
+        self.assertEqual(stats.in_degree0_after, stats.in_degree0_before)
+        self.assertEqual(stats.rows_not_full, 0)  # CAGRA rows are full
+
+    def test_max_share_zero_and_no_params(self):
+        x = clustered_vectors(self.n, self.d, self.nclusters, 0.3, 3)
+        gpu_index = self.build(x)
+        plain_rows = level0_rows(self.copy(gpu_index))
+
+        no_params = faiss.IndexHNSWCagra()
+        no_params.base_level_only = True
+        gpu_index.copyTo(no_params, False, None)
+        np.testing.assert_array_equal(level0_rows(no_params), plain_rows)
+
+        stats = faiss.CagraUpperLevelProjectionStats()
+        zero = self.copy(gpu_index, self.params(max_share=0.0), stats=stats)
+        np.testing.assert_array_equal(level0_rows(zero), plain_rows)
+        self.assertEqual(stats.added_by_overwrite, 0)
+        self.assertGreater(stats.skipped_cap, 0)
+
+    def test_invalid_params_raise(self):
+        x = clustered_vectors(5000, self.d, 20, 0.3, 4)
+        gpu_index = self.build(x)
+        with self.assertRaises(RuntimeError):  # M is required
+            self.copy(gpu_index, self.params(M=0))
+        with self.assertRaises(RuntimeError):
+            self.copy(gpu_index, self.params(max_share=1.5))
+        cpu = faiss.IndexHNSWCagra()
+        cpu.base_level_only = False  # the projection keeps the index base-level only
+        with self.assertRaises(RuntimeError):
+            gpu_index.copyTo(cpu, False, self.params())
+        storing = self.build(x, store_dataset=True)  # not supported with the projection
+        with self.assertRaises(RuntimeError):
+            self.copy(storing, self.params())
+
+    def test_float16_and_skip_storage(self):
+        x = clustered_vectors(self.n, self.d, self.nclusters, 0.3, 5).astype(np.float16)
+        gpu_index = self.build(x, numeric_type=faiss.Float16)
+        for skip_storage in (False, True):
+            stats = faiss.CagraUpperLevelProjectionStats()
+            cpu = self.copy(gpu_index, self.params(), skip_storage=skip_storage, stats=stats)
+            self.assertEqual(reachable_from(level0_rows(cpu), 0), self.n)
+            self.assertGreater(stats.added_by_overwrite, 0)
+            self.assertEqual(stats.in_degree0_after, stats.in_degree0_before)
